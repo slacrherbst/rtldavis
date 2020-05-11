@@ -15,11 +15,15 @@
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-    Modified by Luc Heijst - March 2019
+    Modified by Luc Heijst
+    - March 2019
     Added: Multi-channel hopping
     Added: options  -ex, -u, -fc, -ppm, -gain, -tf, -tr, -maxmissed, 
                     -startfreq, -endfreq, -stepfreq 
     Removed: option -id, -v
+    - May 2020
+    Addred: NZ frequencies
+    Changed: freqErrors are now stored for the right frequencies and transmitters
 */
 package main
 
@@ -43,7 +47,7 @@ var (
     ppm               int            // -ppm = frequency correction of rtl dongle in ppm
     gain              int            // -gain = tuner gain in tenths of a Db
     maxmissed         int            // -maxmisssed = max missed-packets-in-a-row before new init
-    transmitterFreq   *string        // -tf = transmitter frequencies, EU, or US
+    transmitterFreq   *string        // -tf = transmitter frequencies, EU, US or NZ.
     undefined         *bool          // -un = log undefined signals
 
     // general
@@ -75,8 +79,9 @@ var (
     // hop and channel-frequency
     loopTimer         time.Time      // time when next hop sequence will time-out
     loopPeriod        time.Duration  // period since now when next hop sequence will time-out
-    actHopChanIdx     int            // channel-id of actual hop sequence (EU: 0-4, US: 0-50)
+    actHopChanIdx     int            // channel-id of actual hop sequence (EU: 0-4, US and NZ: 0-50)
     nextHopChan       int            // channel-id of next hop
+    nextHopTran       int            // transmitter-id of next hop
     channelFreq       int            // frequency of the channel to transmit
     freqError         int            // frequency error of last hop
     freqCorrection    int            // frequencyCorrection (average freqError per transmitter per channel)
@@ -103,7 +108,7 @@ var (
 
 
 func init() {
-    VERSION := "0.12"
+    VERSION := "0.13"
 var (
     tr        int
     mask    int
@@ -125,7 +130,7 @@ var (
     flag.IntVar(&startFreq, "startfreq", 0, "test")
     flag.IntVar(&endFreq, "endfreq", 0, "test")
     flag.IntVar(&stepFreq, "stepfreq", 0, "test")
-    transmitterFreq = flag.String("tf", "EU", "transmitter frequencies: EU or US")
+    transmitterFreq = flag.String("tf", "EU", "transmitter frequencies: EU, US or NZ")
     undefined = flag.Bool("u", false, "log undefined signals")
 
     flag.Parse()
@@ -169,7 +174,7 @@ func main() {
         log.Fatal(err)
     }
 
-    hop := p.SetHop(0)    // start program with first hop frequency
+    hop := p.SetHop(0, 0)    // start program with first hop frequency
     log.Printf("Hop: %s", hop)
     if err := dev.SetCenterFreq(hop.ChannelFreq + fc); err != nil {
         log.Fatal(err)
@@ -291,7 +296,7 @@ func main() {
                 }
                 loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
                 loopTimer = time.After(loopPeriod)
-                nextHop <- p.SetHop(0)
+                nextHop <- p.SetHop(0, 0)
             } else {
                 if !initTransmitrs {
                     // packet missed
@@ -315,9 +320,10 @@ func main() {
                 if !initTransmitrs {
                     HandleNextHopChannel()
                     nextHopChan = chNextHops[expectedChanPtr]
+                    nextHopTran = actChan[expectedChanPtr]
                     loopPeriod = time.Duration(chNextVisits[expectedChanPtr] - curTime + int64(62500 * time.Microsecond) + int64((ex + 10) * 1000000))
                     loopTimer = time.After(loopPeriod)
-                    nextHop <- p.SetHop(nextHopChan)
+                    nextHop <- p.SetHop(nextHopChan, nextHopTran)
                 } else {
                     // reset chLastVisits
                     for i := 0; i < maxChan; i++ {
@@ -328,7 +334,7 @@ func main() {
                     loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
                     loopTimer = time.After(loopPeriod)
                     log.Printf("Init channels: wait max %d seconds for a message of each transmitter", loopPeriod/1000000000)
-                    nextHop <- p.SetHop(0)
+                    nextHop <- p.SetHop(0, 0)
                 }
             }
 
@@ -342,7 +348,7 @@ func main() {
                             log.Printf("TESTFREQ %d: Frequency %d (freqError=%d): OK, msg.data: %02X", testNumber, testChannelFreq, freqError, msg.Data)
                             loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
                             loopTimer = time.After(loopPeriod)
-                            nextHop <- p.SetHop(0)
+                            nextHop <- p.SetHop(0, 0)
                         }
                     }
                     continue  // read next message
@@ -400,9 +406,10 @@ func main() {
             if handleNxtPacket {
                 HandleNextHopChannel()
                 nextHopChan = chNextHops[expectedChanPtr]
+                nextHopTran = actChan[expectedChanPtr]
                 loopPeriod = time.Duration(chNextVisits[expectedChanPtr] - curTime + int64(62500 * time.Microsecond) + int64((ex + 10) * 1000000))
                 loopTimer = time.After(loopPeriod)
-                nextHop <- p.SetHop(nextHopChan)
+                nextHop <- p.SetHop(nextHopChan, nextHopTran)
             }
         }
     }
