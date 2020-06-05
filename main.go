@@ -20,10 +20,15 @@
     Added: Multi-channel hopping
     Added: options  -ex, -u, -fc, -ppm, -gain, -tf, -tr, -maxmissed, 
                     -startfreq, -endfreq, -stepfreq 
-    Removed: option -id, -v
-    - May 2020
-    Addred: NZ frequencies
+    Removed: options -id, -v
+    - May 20120
+    v0.14:
+    Added:   handling of NZ frequencies
     Changed: freqErrors are now stored for the right frequencies and transmitters
+    v0.15:
+    Added:   options -d, -v, -noafc; thanks to Steve Wormley for the code
+    Changed: detection of freqError; thanks to Steve Wormley for the code
+    Changed: hopping timing (changed receiveWindow from 10 to 300 ms)
 */
 package main
 
@@ -35,10 +40,13 @@ import (
     "os"
     "os/signal"
     "time"
+    "strconv"
+    "fmt"
 
     "github.com/lheijst/rtldavis/protocol"
     "github.com/jpoirier/gortlsdr"
 )
+const maxTr = 8
 
 var (
     // program settings
@@ -48,10 +56,13 @@ var (
     gain              int            // -gain = tuner gain in tenths of a Db
     maxmissed         int            // -maxmisssed = max missed-packets-in-a-row before new init
     transmitterFreq   *string        // -tf = transmitter frequencies, EU, US or NZ.
-    undefined         *bool          // -un = log undefined signals
+    undefined         *bool          // -u = log undefined signals
+    verbose           *bool          // -v = emit verbose debug messages
+    disableAfc        *bool          // -noafc = disable any automatic corrections
+    deviceString      *string        // -d = device serial number or device index
 
     // general
-    actChan           [8]int         // list with actual channels (0-7); 
+    actChan           [maxTr]int     // list with actual channels (0-7); 
                                      //   next values are zero (non-meaning)
     msgIdToChan       []int          // msgIdToChan[id] is pointer to channel in actChan; 
                                      //   non-defined id's have ptr value 9
@@ -59,19 +70,20 @@ var (
     curTime           int64          // current UTC-nanoseconds
     maxFreq           int            // number of frequencies (EU=5, US=51)
     maxChan           int            // number of defined (=actual) channels
+    receiveWindow     int            // timespan in ms for receiving a message
 
     // per channel (index is actChan[ch])
-    chLastVisits      [8]int64       // last visit times in UTC-nanoseconds
-    chNextVisits      [8]int64       // next visit times (future) in UTC-nanoseconds
-    chTotMsgs         [8]int         // total received messages since startup
-    chAlarmCnts       [8]int         // numbers of missed-counts-in-a-row
-    chLastHops        [8]int         // last hop channel-ids (sequential order)
-    chNextHops        [8]int         // next hop channel-ids (sequential order)
-    chMissPerFreq     [8][51]int     // transmitter missed per frequency channel
+    chLastVisits      [maxTr]int64   // last visit times in UTC-nanoseconds
+    chNextVisits      [maxTr]int64   // next visit times (future) in UTC-nanoseconds
+    chTotMsgs         [maxTr]int     // total received messages since startup
+    chAlarmCnts       [maxTr]int     // numbers of missed-counts-in-a-row
+    chLastHops        [maxTr]int     // last hop channel-ids (sequential order)
+    chNextHops        [maxTr]int     // next hop channel-ids (sequential order)
+    chMissPerFreq     [maxTr][51]int // transmitter missed per frequency channel
 
     // per id (index is msg.ID)
-    idLoopPeriods     [8]time.Duration // durations of one loop (higher IDs: longer durations)
-    idUndefs          [8]int         // number of received messages of undefined id's since startup 
+    idLoopPeriods     [maxTr]time.Duration // durations of one loop (higher IDs: longer durations)
+    idUndefs          [maxTr]int     // number of received messages of undefined id's since startup 
 
     // totals
     totInit           int            // total of init procedures since startup (first not counted)
@@ -83,7 +95,7 @@ var (
     nextHopChan       int            // channel-id of next hop
     nextHopTran       int            // transmitter-id of next hop
     channelFreq       int            // frequency of the channel to transmit
-    freqError         int            // frequency error of last hop
+    freqCorr          int            // frequency error of last hop
     freqCorrection    int            // frequencyCorrection (average freqError per transmitter per channel)
 
     // controll
@@ -108,12 +120,13 @@ var (
 
 
 func init() {
-    VERSION := "0.13"
+    VERSION := "0.15"
 var (
-    tr        int
+    tr      int
     mask    int
 )
     msgIdToChan = []int {9, 9, 9, 9, 9, 9, 9, 9, }    // preset with 9 (= undefined)
+    receiveWindow = 300  // in ms
 
     log.SetFlags(log.Lmicroseconds)
     rand.Seed(time.Now().UnixNano())
@@ -132,8 +145,12 @@ var (
     flag.IntVar(&stepFreq, "stepfreq", 0, "test")
     transmitterFreq = flag.String("tf", "EU", "transmitter frequencies: EU, US or NZ")
     undefined = flag.Bool("u", false, "log undefined signals")
+    verbose = flag.Bool("v", false, "emit verbose debug messages")
+    disableAfc = flag.Bool("noafc", false, "disable any AFC")
+    deviceString = flag.String("d","0","device serial number or device index")
 
     flag.Parse()
+    protocol.Verbose = *verbose
 
     log.Printf("rtldavis.go VERSION=%s", VERSION)
     // convert tranceiver code to act channels
@@ -146,7 +163,8 @@ var (
         }
         mask = mask << 1
     }
-    log.Printf("tr=%d fc=%d ppm=%d gain=%d ex=%d maxmissed=%d actChan=%d maxChan=%d", tr, fc, ppm, gain, ex, maxmissed, actChan[0:maxChan], maxChan) 
+    log.Printf("tr=%d fc=%d ppm=%d gain=%d maxmissed=%d ex=%d receiveWindow=%d actChan=%d maxChan=%d", tr, fc, ppm, gain, maxmissed, ex, receiveWindow, actChan[0:maxChan], maxChan)
+    log.Printf("undefined=%v verbose=%v disableAfc=%v deviceString=%s", *undefined, *verbose, *disableAfc, *deviceString)  
 
     // Preset loopperiods per id
     idLoopPeriods[0] = 2562500 * time.Microsecond
@@ -164,10 +182,22 @@ var (
 }
 
 func main() {
+    var sdrIndex int = -1
     p := protocol.NewParser(14, *transmitterFreq)
     p.Cfg.Log()
 
     fs := p.Cfg.SampleRate
+
+    // First attempt to open the device as a Serial Number
+    sdrIndex , _ = rtlsdr.GetIndexBySerial(*deviceString)
+    if (sdrIndex <0 ) {
+        indexreturn,err := strconv.Atoi(*deviceString)
+        if (err != nil) {
+          log.Printf("Could not parse device\n")
+          log.Fatal(err)
+        }
+        sdrIndex = indexreturn
+    }
 
     dev, err := rtlsdr.Open(0)
     if err != nil {
@@ -199,9 +229,11 @@ func main() {
         if err != nil {
             log.Printf("GetTunerGains Failed - error: %s\n", err)
         } else if len(gains) > 0 {
+                gainInfo := "Supported tuner gain: "
             for i := 0; i < len(gains); i++ {
-                log.Printf("Supported tuner gain: %d Db\n", int(gains[i]))
+                gainInfo += fmt.Sprintf("%d Db ", int(gains[i]))
             }
+        log.Printf(gainInfo)
         }
         err = dev.SetTunerGain(gain)
         if err != nil {
@@ -237,7 +269,7 @@ func main() {
     nextHop := make(chan protocol.Hop, 1)
     go func() {
         for hop := range nextHop {
-            freqError = hop.FreqError
+            freqCorr = hop.FreqCorr
             if testFreq {
                 freqCorrection = 0
                 testChannelFreq = testChannelFreq + stepFreq
@@ -248,11 +280,14 @@ func main() {
                 }
                 channelFreq = testChannelFreq
             } else {
-                freqCorrection = freqError
+                freqCorrection = freqCorr
                 log.Printf("Hop: %s", hop)
                 actHopChanIdx = hop.ChannelIdx
                 channelFreq = hop.ChannelFreq
             }
+            if *disableAfc {freqCorrection = 0}
+            if *verbose {log.Printf("applied freqCorrection=%d", freqCorrection)}
+
             if err := dev.SetCenterFreq(channelFreq + freqCorrection + fc); err != nil {
                 //log.Fatal(err)  // no reason top stop program for one error
                 log.Printf("SetCenterFreq: %d error: %s", hop.ChannelFreq, err)
@@ -276,7 +311,7 @@ func main() {
     maxFreq = p.ChannelCount
 
     // Set the idLoopPeriods for one full rotation of the pattern + 1. 
-    loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
+    loopPeriod = time.Duration(maxFreq + 2) * idLoopPeriods[actChan[maxChan-1]]
     loopTimer := time.After(loopPeriod)  // loopTimer of highest transmitter
     log.Printf("Init channels: wait max %d seconds for a message of each transmitter", loopPeriod/1000000000)
 
@@ -294,7 +329,7 @@ func main() {
                 if testNumber > 0 {
                     log.Printf("TESTFREQ %d: Frequency %d: NOK", testNumber, testChannelFreq)
                 }
-                loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
+                loopPeriod = time.Duration(maxFreq + 2) * idLoopPeriods[actChan[maxChan-1]]
                 loopTimer = time.After(loopPeriod)
                 nextHop <- p.SetHop(0, 0)
             } else {
@@ -321,7 +356,7 @@ func main() {
                     HandleNextHopChannel()
                     nextHopChan = chNextHops[expectedChanPtr]
                     nextHopTran = actChan[expectedChanPtr]
-                    loopPeriod = time.Duration(chNextVisits[expectedChanPtr] - curTime + int64(62500 * time.Microsecond) + int64((ex + 10) * 1000000))
+                    loopPeriod = time.Duration(chNextVisits[expectedChanPtr] - curTime + int64(62500 * time.Microsecond) + int64((receiveWindow + ex) * 1000000))
                     loopTimer = time.After(loopPeriod)
                     nextHop <- p.SetHop(nextHopChan, nextHopTran)
                 } else {
@@ -331,7 +366,7 @@ func main() {
                     }
                     visitCount = 0
                     totInit++
-                    loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
+                    loopPeriod = time.Duration(maxFreq + 2) * idLoopPeriods[actChan[maxChan-1]]
                     loopTimer = time.After(loopPeriod)
                     log.Printf("Init channels: wait max %d seconds for a message of each transmitter", loopPeriod/1000000000)
                     nextHop <- p.SetHop(0, 0)
@@ -345,8 +380,8 @@ func main() {
                 if testFreq {
                     if testNumber > 0 {
                         if msgIdToChan[int(msg.ID)] != 9 {
-                            log.Printf("TESTFREQ %d: Frequency %d (freqError=%d): OK, msg.data: %02X", testNumber, testChannelFreq, freqError, msg.Data)
-                            loopPeriod = time.Duration(maxFreq +2) * idLoopPeriods[actChan[maxChan-1]]
+                            log.Printf("TESTFREQ %d: Frequency %d (freqCorr=%d): OK, msg.data: %02X", testNumber, testChannelFreq, freqCorr, msg.Data)
+                            loopPeriod = time.Duration(maxFreq + 2) * idLoopPeriods[actChan[maxChan-1]]
                             loopTimer = time.After(loopPeriod)
                             nextHop <- p.SetHop(0, 0)
                         }
@@ -407,7 +442,7 @@ func main() {
                 HandleNextHopChannel()
                 nextHopChan = chNextHops[expectedChanPtr]
                 nextHopTran = actChan[expectedChanPtr]
-                loopPeriod = time.Duration(chNextVisits[expectedChanPtr] - curTime + int64(62500 * time.Microsecond) + int64((ex + 10) * 1000000))
+                loopPeriod = time.Duration(chNextVisits[expectedChanPtr] - curTime + int64(62500 * time.Microsecond) + int64((receiveWindow + ex) * 1000000))
                 loopTimer = time.After(loopPeriod)
                 nextHop <- p.SetHop(nextHopChan, nextHopTran)
             }
