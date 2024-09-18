@@ -18,8 +18,8 @@
     Modified by Luc Heijst
     - March 2019
     Added: Multi-channel hopping
-    Added: options  -ex, -u, -fc, -ppm, -gain, -tf, -tr, -maxmissed, 
-                    -startfreq, -endfreq, -stepfreq 
+    Added: options  -ex, -u, -fc, -ppm, -gain, -tf, -tr, -maxmissed,
+                    -startfreq, -endfreq, -stepfreq
     Removed: options -id, -v
     - May 20120
     v0.14:
@@ -62,9 +62,9 @@ var (
     deviceString      *string        // -d = device serial number or device index
 
     // general
-    actChan           [maxTr]int     // list with actual channels (0-7); 
+    actChan           [maxTr]int     // list with actual channels (0-7);
                                      //   next values are zero (non-meaning)
-    msgIdToChan       []int          // msgIdToChan[id] is pointer to channel in actChan; 
+    msgIdToChan       []int          // msgIdToChan[id] is pointer to channel in actChan;
                                      //   non-defined id's have ptr value 9
     expectedChanPtr   int            // pointer to actChan of next expected msg.Data
     curTime           int64          // current UTC-nanoseconds
@@ -83,7 +83,7 @@ var (
 
     // per id (index is msg.ID)
     idLoopPeriods     [maxTr]time.Duration // durations of one loop (higher IDs: longer durations)
-    idUndefs          [maxTr]int     // number of received messages of undefined id's since startup 
+    idUndefs          [maxTr]int     // number of received messages of undefined id's since startup
 
     // totals
     totInit           int            // total of init procedures since startup (first not counted)
@@ -164,7 +164,7 @@ var (
         mask = mask << 1
     }
     log.Printf("tr=%d fc=%d ppm=%d gain=%d maxmissed=%d ex=%d receiveWindow=%d actChan=%d maxChan=%d", tr, fc, ppm, gain, maxmissed, ex, receiveWindow, actChan[0:maxChan], maxChan)
-    log.Printf("undefined=%v verbose=%v disableAfc=%v deviceString=%s", *undefined, *verbose, *disableAfc, *deviceString)  
+    log.Printf("undefined=%v verbose=%v disableAfc=%v deviceString=%s", *undefined, *verbose, *disableAfc, *deviceString)
 
     // Preset loopperiods per id
     idLoopPeriods[0] = 2562500 * time.Microsecond
@@ -199,7 +199,9 @@ func main() {
         sdrIndex = indexreturn
     }
 
-    dev, err := rtlsdr.Open(0)
+	 log.Printf("Using index %s\n",sdrIndex);
+
+    dev, err := rtlsdr.Open(sdrIndex)
     if err != nil {
         log.Fatal(err)
     }
@@ -273,7 +275,7 @@ func main() {
             if testFreq {
                 freqCorrection = 0
                 testChannelFreq = testChannelFreq + stepFreq
-                testNumber++ 
+                testNumber++
                 if testChannelFreq > endFreq {
                     endmsg := "Test reached endfreq; test ended"
                     log.Fatal(endmsg)
@@ -310,7 +312,7 @@ func main() {
     initTransmitrs = true
     maxFreq = p.ChannelCount
 
-    // Set the idLoopPeriods for one full rotation of the pattern + 1. 
+    // Set the idLoopPeriods for one full rotation of the pattern + 1.
     loopPeriod = time.Duration(maxFreq + 2) * idLoopPeriods[actChan[maxChan-1]]
     loopTimer := time.After(loopPeriod)  // loopTimer of highest transmitter
     log.Printf("Init channels: wait max %d seconds for a message of each transmitter", loopPeriod/1000000000)
@@ -421,18 +423,18 @@ func main() {
                                 handleNxtPacket = true
                             }
                         } else {
-                            chLastVisits[msgIdToChan[int(msg.ID)]] = curTime  // update chLastVisits timer 
+                            chLastVisits[msgIdToChan[int(msg.ID)]] = curTime  // update chLastVisits timer
                         }
                     } else {
                         // normal hopping
                         chLastHops[msgIdToChan[int(msg.ID)]] = p.HopToSeq(actHopChanIdx)
                         chLastVisits[msgIdToChan[int(msg.ID)]] = curTime
                         if *undefined {
-                            log.Printf("%02X %d %d %d %d %d msg.ID=%d undefined:%d", 
+                            log.Printf("%02X %d %d %d %d %d msg.ID=%d undefined:%d",
                                 msg.Data, chTotMsgs[0], chTotMsgs[1], chTotMsgs[2], chTotMsgs[3], totInit, msg.ID, idUndefs)
                         } else {
-                            log.Printf("%02X %d %d %d %d %d msg.ID=%d", 
-                                msg.Data, chTotMsgs[0], chTotMsgs[1], chTotMsgs[2], chTotMsgs[3], totInit, msg.ID) 
+                            log.Printf("%02X %d %d %d %d %d msg.ID=%d",
+                                msg.Data, chTotMsgs[0], chTotMsgs[1], chTotMsgs[2], chTotMsgs[3], totInit, msg.ID)
                         }
                         handleNxtPacket = true
                     }
