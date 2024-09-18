@@ -182,7 +182,7 @@ var (
 }
 
 func main() {
-    var sdrIndex int = -1
+    var sdrIndex int = 0
     p := protocol.NewParser(14, *transmitterFreq)
     p.Cfg.Log()
 
@@ -199,7 +199,7 @@ func main() {
         sdrIndex = indexreturn
     }
 
-	 log.Printf("Using index %s\n",sdrIndex);
+	 log.Printf("Using index %d\n",sdrIndex);
 
     dev, err := rtlsdr.Open(sdrIndex)
     if err != nil {
